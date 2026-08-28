@@ -8,6 +8,7 @@ import makeWASocket, {
   downloadMediaMessage,
   fetchLatestBaileysVersion,
   useMultiFileAuthState,
+  Browsers,
 } from "@whiskeysockets/baileys";
 
 const PORT = process.env.PORT || 8080;
@@ -77,7 +78,7 @@ async function startSession(ref, { externalId, phone, webhookUrl }) {
     printQRInTerminal: false,
     markOnlineOnConnect: false,
     syncFullHistory: false,
-    browser: ["Chrome", "Chrome", "120.0.0.0"],
+    browser: Browsers.macOS("Desktop"),
   });
   const entry = {
     sock, externalId, phone, webhookUrl,
