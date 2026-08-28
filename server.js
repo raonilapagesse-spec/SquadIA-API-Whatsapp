@@ -9,6 +9,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   useMultiFileAuthState,
   Browsers,
+  makeCacheableSignalKeyStore,
 } from "@whiskeysockets/baileys";
 
 const PORT = process.env.PORT || 8080;
@@ -69,16 +70,23 @@ function typeOf(msg) {
   return "text";
 }
 
-async function startSession(ref, { externalId, phone, webhookUrl }) {
+async function startSession(ref, { externalId, phone, webhookUrl, isNewSession = false }) {
   const folder = path.join(DATA_DIR, ref);
   const { state, saveCreds } = await useMultiFileAuthState(folder);
   const { version } = await fetchLatestBaileysVersion();
   const sock = makeWASocket({
-    version, auth: state, logger,
+    version,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
+    logger,
     printQRInTerminal: false,
     markOnlineOnConnect: false,
-    syncFullHistory: false,
     browser: Browsers.macOS("Desktop"),
+    generateHighQualityLinkPreview: true,
+    shouldSyncHistoryMessage: false,
+    syncFullHistory: false,
   });
   const entry = {
     sock, externalId, phone, webhookUrl,
@@ -109,7 +117,7 @@ async function startSession(ref, { externalId, phone, webhookUrl }) {
       });
       if (!loggedOut) {
         setTimeout(() => {
-          startSession(ref, { externalId, phone, webhookUrl }).catch((e) => logger.error({ e }, "reconnect failed"));
+          startSession(ref, { externalId, phone, webhookUrl, isNewSession: false }).catch((e) => logger.error({ e }, "reconnect failed"));
         }, 3000);
       } else {
         sessions.delete(ref);
@@ -159,7 +167,7 @@ async function startSession(ref, { externalId, phone, webhookUrl }) {
       });
     }
   });
-  if (!state.creds?.registered && phone) {
+  if (isNewSession && !state.creds?.registered && phone) {
     setTimeout(async () => {
       try {
         const code = await sock.requestPairingCode(phone.replace(/\D/g, ""));
@@ -200,7 +208,7 @@ app.post("/sessions", async (req, res) => {
     sessions.delete(ref);
   }
   try {
-    const entry = await startSession(ref, { externalId, phone, webhookUrl });
+    const entry = await startSession(ref, { externalId, phone, webhookUrl, isNewSession: true });
     for (let i = 0; i < 20 && !entry.pairingCode && entry.status === "pairing"; i++) {
       await new Promise((r) => setTimeout(r, 300));
     }
@@ -216,7 +224,7 @@ app.get("/sessions/:ref", async (req, res) => {
   if (!entry) {
     const meta = loadMeta(req.params.ref);
     if (meta) {
-      const revived = await startSession(req.params.ref, meta);
+      const revived = await startSession(req.params.ref, { ...meta, isNewSession: false });
       return res.json({ status: revived.status, phone: revived.phone, pairingCode: revived.pairingCode });
     }
     return res.status(404).json({ error: "not found" });
@@ -289,7 +297,7 @@ app.get("/sessions/:ref/media/:mediaRef", async (req, res) => {
 
 for (const ref of fs.existsSync(DATA_DIR) ? fs.readdirSync(DATA_DIR) : []) {
   const meta = loadMeta(ref);
-  if (meta) startSession(ref, meta).catch((e) => logger.error({ e }, `revive ${ref} failed`));
+  if (meta) startSession(ref, { ...meta, isNewSession: false }).catch((e) => logger.error({ e }, `revive ${ref} failed`));
 }
 
 app.listen(PORT, () => console.log(`SquadIA WhatsApp bridge on :${PORT}`));
