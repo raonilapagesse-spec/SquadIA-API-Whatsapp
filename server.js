@@ -29,6 +29,16 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 const sessions = new Map();
+let stopped = false;
+
+process.on("SIGTERM", () => {
+  stopped = true;
+});
+
+process.on("SIGINT", () => {
+  stopped = true;
+  process.exit(0);
+});
 
 function metaPath(ref) { return path.join(DATA_DIR, ref, "meta.json"); }
 
@@ -71,6 +81,7 @@ function typeOf(msg) {
 }
 
 async function startSession(ref, { externalId, phone, webhookUrl, isNewSession = false }) {
+  if (stopped) return null;
   const folder = path.join(DATA_DIR, ref);
   const { state, saveCreds } = await useMultiFileAuthState(folder);
   const { version } = await fetchLatestBaileysVersion();
@@ -98,6 +109,7 @@ async function startSession(ref, { externalId, phone, webhookUrl, isNewSession =
   saveMeta(ref, { externalId, phone, webhookUrl });
   sock.ev.on("creds.update", saveCreds);
   sock.ev.on("connection.update", async (u) => {
+    if (stopped) return;
     const { connection, lastDisconnect } = u;
     if (connection === "open") {
       entry.status = "connected";
@@ -115,7 +127,7 @@ async function startSession(ref, { externalId, phone, webhookUrl, isNewSession =
         type: "status", externalId, status: entry.status,
         error: loggedOut ? "Sessão encerrada no aparelho." : null,
       });
-      if (!loggedOut) {
+      if (!loggedOut && !stopped) {
         setTimeout(() => {
           startSession(ref, { externalId, phone, webhookUrl, isNewSession: false }).catch((e) => logger.error({ e }, "reconnect failed"));
         }, 3000);
@@ -125,6 +137,7 @@ async function startSession(ref, { externalId, phone, webhookUrl, isNewSession =
     }
   });
   sock.ev.on("chats.upsert", async (chats) => {
+    if (stopped) return;
     await postWebhook(webhookUrl, {
       type: "chats", externalId,
       chats: chats.map((c) => ({
@@ -138,6 +151,7 @@ async function startSession(ref, { externalId, phone, webhookUrl, isNewSession =
     });
   });
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (stopped) return;
     if (type !== "notify") return;
     for (const msg of messages) {
       if (!msg.message) continue;
@@ -169,6 +183,7 @@ async function startSession(ref, { externalId, phone, webhookUrl, isNewSession =
   });
   if (isNewSession && !state.creds?.registered && phone) {
     setTimeout(async () => {
+      if (stopped) return;
       try {
         const code = await sock.requestPairingCode(phone.replace(/\D/g, ""));
         entry.pairingCode = code;
@@ -197,6 +212,7 @@ app.use((req, res, next) => {
 app.get("/health", (_req, res) => res.json({ ok: true, sessions: sessions.size }));
 
 app.post("/sessions", async (req, res) => {
+  if (stopped) return res.status(503).json({ error: "server stopping" });
   const { externalId, phone, webhookUrl } = req.body || {};
   if (!externalId || !phone || !webhookUrl) {
     return res.status(400).json({ error: "externalId, phone e webhookUrl são obrigatórios" });
@@ -209,6 +225,7 @@ app.post("/sessions", async (req, res) => {
   }
   try {
     const entry = await startSession(ref, { externalId, phone, webhookUrl, isNewSession: true });
+    if (!entry) return res.status(503).json({ error: "server stopping" });
     for (let i = 0; i < 20 && !entry.pairingCode && entry.status === "pairing"; i++) {
       await new Promise((r) => setTimeout(r, 300));
     }
@@ -225,6 +242,7 @@ app.get("/sessions/:ref", async (req, res) => {
     const meta = loadMeta(req.params.ref);
     if (meta) {
       const revived = await startSession(req.params.ref, { ...meta, isNewSession: false });
+      if (!revived) return res.status(503).json({ error: "server stopping" });
       return res.json({ status: revived.status, phone: revived.phone, pairingCode: revived.pairingCode });
     }
     return res.status(404).json({ error: "not found" });
@@ -248,6 +266,7 @@ app.delete("/sessions/:ref", async (req, res) => {
 });
 
 app.post("/sessions/:ref/messages", async (req, res) => {
+  if (stopped) return res.status(503).json({ error: "server stopping" });
   const entry = sessions.get(req.params.ref);
   if (!entry || entry.status !== "connected") {
     return res.status(409).json({ error: "sessão não conectada" });
@@ -295,9 +314,11 @@ app.get("/sessions/:ref/media/:mediaRef", async (req, res) => {
   }
 });
 
-for (const ref of fs.existsSync(DATA_DIR) ? fs.readdirSync(DATA_DIR) : []) {
-  const meta = loadMeta(ref);
-  if (meta) startSession(ref, { ...meta, isNewSession: false }).catch((e) => logger.error({ e }, `revive ${ref} failed`));
+if (!stopped) {
+  for (const ref of fs.existsSync(DATA_DIR) ? fs.readdirSync(DATA_DIR) : []) {
+    const meta = loadMeta(ref);
+    if (meta) startSession(ref, { ...meta, isNewSession: false }).catch((e) => logger.error({ e }, `revive ${ref} failed`));
+  }
 }
 
 app.listen(PORT, () => console.log(`SquadIA WhatsApp bridge on :${PORT}`));
